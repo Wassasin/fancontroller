@@ -29,7 +29,7 @@ static inline void sys_put_be16(uint16_t val, uint8_t dst[2])
 //     return i2c_master_write_read_device(port, SHTC3_SENSOR_ADDR, write_buf, sizeof(write_buf), read_buf, 2, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
 // }
 
-static esp_err_t shtc3_register_read(i2c_port_t port, uint8_t* data, size_t len)
+static esp_err_t shtc3_read(i2c_port_t port, uint8_t* data, size_t len)
 {
     return i2c_master_read_from_device(port, SHTC3_SENSOR_ADDR, data, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
 }
@@ -55,7 +55,7 @@ esp_err_t shtc3_measure(i2c_port_t port, shtc3_sample_t* sample_out)
 
     uint8_t data[6] = { 0 };
     while (1) {
-        if (ESP_OK == shtc3_register_read(port, data, sizeof(data))) {
+        if (ESP_OK == shtc3_read(port, data, sizeof(data))) {
             uint16_t temp_raw = sys_get_be16(&data[0]);
             uint16_t hum_raw = sys_get_be16(&data[3]);
 
