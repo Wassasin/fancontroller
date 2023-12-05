@@ -10,9 +10,11 @@ idf_component_register(SRCS
     "mqtt.c"
     "performance.c"
     "periodic.c"
+    "power.c"
     "tacho.c"
     "temperature.c"
     "wifi.c"
 
     "driver/shtc3.c"
+    "driver/fusb302b.c"
         INCLUDE_DIRS ".")
