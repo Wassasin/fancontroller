@@ -42,6 +42,8 @@ static void power_task(void* arg)
 
     bool pd = false;
     while (1) {
+        xSemaphoreTake(s_sem, 100 / portTICK_PERIOD_MS); // Ignore result
+
         if (!pd) {
             ESP_ERROR_CHECK(i2c_bus_take(I2C_BUS));
             esp_err_t res = fusb302b_try_autoconnect(I2C_BUS);
@@ -51,7 +53,8 @@ static void power_task(void* arg)
                 ESP_LOGI(TAG, "USB PD CC pin found!");
             }
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        
+        ESP_ERROR_CHECK(fusb302b_poll(I2C_BUS));
     }
 }
 

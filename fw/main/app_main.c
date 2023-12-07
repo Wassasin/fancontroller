@@ -24,14 +24,15 @@ void app_main(void)
     ESP_ERROR_CHECK(events_init());
     ESP_ERROR_CHECK(performance_init());
     ESP_ERROR_CHECK(i2c_bus_init());
-    ESP_ERROR_CHECK(power_init());
 
-    // ESP_ERROR_CHECK(led_init());
-    // led_set_color((rgb_t) {
-    //     .r = 0x10,
-    //     .g = 0x00,
-    //     .b = 0x00,
-    // });
+    ESP_ERROR_CHECK(led_init());
+    led_set_color((rgb_t) {
+        .r = 0x01,
+        .g = 0x00,
+        .b = 0x00,
+    });
+
+    ESP_ERROR_CHECK(power_init());
 
     // ESP_ERROR_CHECK(adc_init());
     // ESP_ERROR_CHECK(tacho_init());

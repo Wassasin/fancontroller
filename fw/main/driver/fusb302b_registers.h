@@ -60,6 +60,22 @@ typedef union {
 typedef union {
     struct
     {
+        uint8_t ensop1 : 1;
+        uint8_t ensop2 : 1;
+        uint8_t rx_flush : 1;
+        uint8_t reserved1 : 1;
+        uint8_t bist_mode2 : 1;
+        uint8_t ensop1db : 1;
+        uint8_t ensop2db : 1;
+        uint8_t reserved2 : 1;
+    };
+    uint8_t val;
+} reg_control1_t;
+#define REG_CONTROL1 0x07
+
+typedef union {
+    struct
+    {
         uint8_t auto_retry : 1;
         uint8_t n_retries : 2;
         uint8_t auto_softreset : 2;
@@ -126,3 +142,39 @@ typedef union {
     uint8_t val;
 } reg_status0_t;
 #define REG_STATUS0 0x40
+
+typedef union {
+    struct
+    {
+        uint8_t ocp : 1;
+        uint8_t ovrtemp : 1;
+        uint8_t tx_full : 1;
+        uint8_t tx_empty : 1;
+        uint8_t rx_full : 1;
+        uint8_t rx_empty : 1;
+        uint8_t rxsop1 : 1;
+        uint8_t rxsop2 : 1;
+    };
+    uint8_t val;
+} reg_status1_t;
+#define REG_STATUS1 0x41
+
+#define REG_FIFOS 0x43
+
+#define FIFO_TX_TXON 0xA1
+#define FIFO_TX_SOP1 0x12
+#define FIFO_TX_SOP2 0x13
+#define FIFO_TX_SOP3 0x1B
+#define FIFO_TX_RESET1 0x15
+#define FIFO_TX_RESET2 0x16
+#define FIFO_TX_PACKSYM 0x80
+#define FIFO_TX_JAM_CRC 0xFF
+#define FIFO_TX_EOP 0x14
+#define FIFO_TX_TXOFF 0xFE
+
+#define FIFO_RX_TOKEN_BITS 0xE0
+#define FIFO_RX_SOP 0xE0
+#define FIFO_RX_SOP1 0xC0
+#define FIFO_RX_SOP2 0xA0
+#define FIFO_RX_SOP1DB 0x80
+#define FIFO_RX_SOP2DB 0x60
