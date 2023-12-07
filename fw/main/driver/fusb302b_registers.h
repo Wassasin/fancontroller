@@ -107,6 +107,22 @@ typedef union {
 typedef union {
     struct
     {
+        uint8_t m_hardrst : 1;
+        uint8_t m_softrst : 1;
+        uint8_t m_txsent : 1;
+        uint8_t m_hardsent : 1;
+        uint8_t m_retryfail : 1;
+        uint8_t m_softfail : 1;
+        uint8_t m_togdone : 1;
+        uint8_t m_ocp_temp : 1;
+    };
+    uint8_t val;
+} reg_maska_t;
+#define REG_MASKA 0x0E
+
+typedef union {
+    struct
+    {
         uint8_t pwr_bandgap_wake : 1;
         uint8_t pwr_receiver_ref : 1;
         uint8_t pwr_measure : 1;
@@ -127,6 +143,9 @@ typedef union {
     uint8_t val;
 } reg_reset_t;
 #define REG_RESET 0x0C
+
+#define REG_INTERRUPTA 0x3E
+#define REG_INTERRUPTB 0x3F
 
 typedef union {
     struct
@@ -158,6 +177,22 @@ typedef union {
     uint8_t val;
 } reg_status1_t;
 #define REG_STATUS1 0x41
+
+typedef union {
+    struct
+    {
+        uint8_t i_bc_lvl : 1;
+        uint8_t i_collision : 1;
+        uint8_t i_wake : 1;
+        uint8_t i_alert : 1;
+        uint8_t i_crc_chk : 1;
+        uint8_t i_comp_chng : 1;
+        uint8_t i_activity : 1;
+        uint8_t i_vbusok : 1;
+    };
+    uint8_t val;
+} reg_interrupt_t;
+#define REG_INTERRUPT 0x42
 
 #define REG_FIFOS 0x43
 

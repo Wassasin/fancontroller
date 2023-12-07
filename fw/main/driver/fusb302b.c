@@ -6,50 +6,52 @@
 #include "led.h"
 #include "util.h"
 
+#include <driver/gpio.h>
 #include <esp_log.h>
 
 #define TAG "fusb302b"
 
 #define I2C_MASTER_TIMEOUT_MS 100
 #define FUSB302B_ADDR 0x22
+#define HEADER_TEMPLATE (PD_DATAROLE_UFP | PD_POWERROLE_SINK)
 
 typedef struct {
     uint8_t index;
     bool is_pps;
     uint32_t voltage_mv;
     uint32_t current_ma;
-} fusb302_pdo_t;
+} fusb302b_pdo_t;
 
-static esp_err_t fusb302_registers_read(i2c_port_t port, uint8_t address, uint8_t* data, size_t len)
+static esp_err_t fusb302b_registers_read(const fusb302b_state_t* state, uint8_t address, uint8_t* data, size_t len)
 {
     esp_err_t ret;
 
-    ERROR_CHECK_SIMPLE(i2c_master_write_to_device(port, FUSB302B_ADDR, &address, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
-    ERROR_CHECK_SIMPLE(i2c_master_read_from_device(port, FUSB302B_ADDR, data, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
+    ERROR_CHECK_SIMPLE(i2c_master_write_to_device(state->port, FUSB302B_ADDR, &address, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
+    ERROR_CHECK_SIMPLE(i2c_master_read_from_device(state->port, FUSB302B_ADDR, data, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
 
     return ESP_OK;
 err:
     return ret;
 }
 
-static esp_err_t fusb302_register_read(i2c_port_t port, uint8_t address, uint8_t* data)
+static esp_err_t fusb302b_register_read(const fusb302b_state_t* state, uint8_t address, uint8_t* data)
 {
-    return fusb302_registers_read(port, address, data, 1);
+    return fusb302b_registers_read(state, address, data, 1);
 }
 
-static esp_err_t fusb302_register_write(i2c_port_t port, const uint8_t address, const uint8_t data)
+static esp_err_t fusb302b_register_write(const fusb302b_state_t* state, const uint8_t address, const uint8_t data)
 {
     uint8_t buf[2] = { address, data };
-    return i2c_master_write_to_device(port, FUSB302B_ADDR, buf, ARRAY_SIZE(buf), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+    return i2c_master_write_to_device(state->port, FUSB302B_ADDR, buf, ARRAY_SIZE(buf), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
 }
 
-static esp_err_t fusb302_registers_write(i2c_port_t port, const uint8_t address, const uint8_t* data, size_t len)
+static esp_err_t fusb302b_registers_write(const fusb302b_state_t* state, const uint8_t address, const uint8_t* data, size_t len)
 {
     esp_err_t ret;
 
     // TODO bulk transfer
     for (size_t i = 0; i < len; ++i) {
-        ERROR_CHECK_SIMPLE(fusb302_register_write(port, address, data[i]));
+        ERROR_CHECK_SIMPLE(fusb302b_register_write(state, address, data[i]));
     }
 
     return ESP_OK;
@@ -73,30 +75,71 @@ static const char* product_id_to_str(uint8_t product_id)
     }
 }
 
-esp_err_t fusb302b_try_autoconnect(i2c_port_t port)
+static esp_err_t fusb302b_send_message(fusb302b_state_t* state, pd_msg* msg)
+{
+    esp_err_t ret;
+
+    msg->hdr &= ~PD_HDR_MESSAGEID;
+    msg->hdr |= (state->counter % 8) << PD_HDR_MESSAGEID_SHIFT;
+    state->counter++;
+
+    static uint8_t sop_seq[5] = { FIFO_TX_SOP1, FIFO_TX_SOP1, FIFO_TX_SOP1, FIFO_TX_SOP2, FIFO_TX_PACKSYM };
+    static const uint8_t eop_seq[4] = { FIFO_TX_JAM_CRC, FIFO_TX_EOP, FIFO_TX_TXOFF, FIFO_TX_TXON };
+
+    uint8_t msg_len = 2 + 4 * PD_NUMOBJ_GET(msg);
+
+    // Set number of bytes in header
+    sop_seq[4] = FIFO_TX_PACKSYM | msg_len;
+
+    ERROR_CHECK_SIMPLE(fusb302b_registers_write(state, REG_FIFOS, sop_seq, ARRAY_SIZE(sop_seq)));
+    ERROR_CHECK_SIMPLE(fusb302b_registers_write(state, REG_FIFOS, msg->bytes, msg_len));
+    ERROR_CHECK_SIMPLE(fusb302b_registers_write(state, REG_FIFOS, eop_seq, ARRAY_SIZE(eop_seq)));
+
+    reg_status1_t status1;
+    size_t i = 0;
+    for (; i < 100; ++i) {
+        ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS1, &status1.val));
+
+        if (status1.tx_empty == 1) {
+            break;
+        }
+
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+
+    if (i == 100) {
+        ESP_LOGW(TAG, "Failed to sent message in time");
+    }
+
+    return ESP_OK;
+err:
+    return ret;
+}
+
+esp_err_t fusb302b_try_autoconnect(fusb302b_state_t* state)
 {
     esp_err_t ret;
     uint8_t bc_lvl1, bc_lvl2;
 
     // Disconnect txcc's
     reg_switches1_t switches1 = (reg_switches1_t) { .specrev = 0b01 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES1, switches1.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES1, switches1.val));
 
     reg_switches0_t switches0 = (reg_switches0_t) { .pdwn1 = 1, .pdwn2 = 1, .meas_cc1 = 1, .meas_cc2 = 0 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES0, switches0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES0, switches0.val));
 
     reg_status0_t status0;
-    ERROR_CHECK_SIMPLE(fusb302_register_read(port, REG_STATUS0, &status0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS0, &status0.val));
     bc_lvl1 = status0.bc_lvl;
 
     switches0 = (reg_switches0_t) { .pdwn1 = 1, .pdwn2 = 1, .meas_cc1 = 0, .meas_cc2 = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES0, switches0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES0, switches0.val));
 
-    ERROR_CHECK_SIMPLE(fusb302_register_read(port, REG_STATUS0, &status0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS0, &status0.val));
     bc_lvl2 = status0.bc_lvl;
 
     switches0 = (reg_switches0_t) { .pdwn1 = 1, .pdwn2 = 1, .meas_cc1 = 0, .meas_cc2 = 0 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES0, switches0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES0, switches0.val));
 
     if (bc_lvl1 == 0 && bc_lvl2 == 0) {
         return ESP_ERR_NOT_FOUND;
@@ -114,32 +157,62 @@ esp_err_t fusb302b_try_autoconnect(i2c_port_t port)
 
     switches1.auto_crc = 1;
 
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES0, switches0.val));
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_SWITCHES1, switches1.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES0, switches0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_SWITCHES1, switches1.val));
 
     reg_control0_t control0 = (reg_control0_t) { .tx_flush = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_CONTROL0, control0.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_CONTROL0, control0.val));
 
     reg_control1_t control1 = (reg_control1_t) { .rx_flush = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_CONTROL1, control1.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_CONTROL1, control1.val));
 
-    reg_reset_t reset = (reg_reset_t) { .pd_reset = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_RESET, reset.val));
+    // reg_reset_t reset = (reg_reset_t) { .pd_reset = 1 };
+    // ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_RESET, reset.val));
+
+    ERROR_CHECK_SIMPLE(fusb302b_psu_soft_reset(state));
+    vTaskDelay(100 / portTICK_PERIOD_MS);
 
     return ESP_OK;
 err:
     return ret;
 }
 
-esp_err_t fusb302b_init(i2c_port_t port)
+esp_err_t fusb302b_psu_soft_reset(fusb302b_state_t* state)
+{
+    // pd_msg msg;
+    // msg.hdr = HEADER_TEMPLATE | PD_MSGTYPE_GET_SOURCE_CAP | PD_NUMOBJ(0);
+    // return fusb302b_send_message(state, &msg);
+
+    return ESP_OK;
+}
+
+esp_err_t fusb302b_poke(fusb302b_state_t* state)
+{
+    esp_err_t ret;
+
+    pd_msg msg;
+    msg.hdr = HEADER_TEMPLATE | PD_MSGTYPE_GET_SOURCE_CAP | PD_NUMOBJ(0);
+    ERROR_CHECK_SIMPLE(fusb302b_send_message(state, &msg));
+
+    // msg.hdr = HEADER_TEMPLATE | PD_MSGTYPE_PING | PD_NUMOBJ(0);
+    // ERROR_CHECK_SIMPLE(fusb302b_send_message(state, &msg));
+
+    // ESP_LOGI(TAG, "Messages sent");
+
+    return ESP_OK;
+err:
+    return ret;
+}
+
+esp_err_t fusb302b_init(fusb302b_state_t* state, i2c_port_t port)
 {
     esp_err_t ret;
 
     reg_reset_t reset = (reg_reset_t) { .sw_res = 1, .pd_reset = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_RESET, reset.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_RESET, reset.val));
 
     reg_device_id_t device_id;
-    ERROR_CHECK_SIMPLE(fusb302_register_read(port, REG_DEVICE_ID, &device_id.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_DEVICE_ID, &device_id.val));
     ESP_LOGI(TAG, "Device ID: %s rev%u_%u", product_id_to_str(device_id.product_id), device_id.revision_id, device_id.version_id % 0b1000);
 
     reg_power_t power = (reg_power_t) {
@@ -148,45 +221,57 @@ esp_err_t fusb302b_init(i2c_port_t port)
         .pwr_measure = 1,
         .pwr_osc = 1,
     };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_POWER, power.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_POWER, power.val));
 
-    reg_mask_t mask = (reg_mask_t) { .val = 0xff }; // Enable all
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_MASK, mask.val));
+    reg_mask_t mask = (reg_mask_t) { .val = 0xff };
+    mask.m_crc_chk = 0;
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_MASK, mask.val));
 
-    reg_control0_t control0 = (reg_control0_t) {};
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_CONTROL0, control0.val));
+    reg_maska_t maska = (reg_maska_t) { .val = 0xff };
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_MASKA, maska.val));
+
+    reg_control0_t control0 = (reg_control0_t) {}; // Enables interrupts
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_CONTROL0, control0.val));
 
     reg_control3_t control3 = (reg_control3_t) { .n_retries = 0b11, .auto_retry = 1 };
-    ERROR_CHECK_SIMPLE(fusb302_register_write(port, REG_CONTROL3, control3.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_write(state, REG_CONTROL3, control3.val));
+
+    reg_status0_t status0;
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS0, &status0.val));
+    ESP_LOGI(TAG, "Status0 %u", status0.val);
+
+    reg_status1_t status1;
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS1, &status1.val));
+    ESP_LOGI(TAG, "Status1 %u", status1.val);
 
     return ESP_OK;
 err:
     return ret;
 }
 
-static esp_err_t fusb302b_read_message(i2c_port_t port, bool* msg_filled, pd_msg* msg)
+static esp_err_t fusb302b_read_message(fusb302b_state_t* state, bool* msg_filled, pd_msg* msg)
 {
     esp_err_t ret;
     *msg_filled = false;
 
     uint8_t byte;
-    ERROR_CHECK_SIMPLE(fusb302_register_read(port, REG_FIFOS, &byte));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_FIFOS, &byte));
 
     // Only interested in SOP-messages
     if ((byte & FIFO_RX_TOKEN_BITS) != FIFO_RX_SOP) {
         return ESP_OK;
     }
 
-    ERROR_CHECK_SIMPLE(fusb302_registers_read(port, REG_FIFOS, msg->bytes, 2));
+    ERROR_CHECK_SIMPLE(fusb302b_registers_read(state, REG_FIFOS, msg->bytes, 2));
     uint8_t numobj = PD_NUMOBJ_GET(msg);
 
     if (numobj > 0) {
-        ERROR_CHECK_SIMPLE(fusb302_registers_read(port, REG_FIFOS, msg->bytes + 2, numobj * 4));
+        ERROR_CHECK_SIMPLE(fusb302b_registers_read(state, REG_FIFOS, msg->bytes + 2, numobj * 4));
     }
 
     // Throw away CRC as the chip has already checked it.
     uint8_t garbage[4];
-    ERROR_CHECK_SIMPLE(fusb302_registers_read(port, REG_FIFOS, garbage, ARRAY_SIZE(garbage)));
+    ERROR_CHECK_SIMPLE(fusb302b_registers_read(state, REG_FIFOS, garbage, ARRAY_SIZE(garbage)));
 
     *msg_filled = true;
 
@@ -195,28 +280,7 @@ err:
     return ret;
 }
 
-static esp_err_t fusb302b_send_message(i2c_port_t port, const pd_msg* msg)
-{
-    esp_err_t ret;
-
-    static uint8_t sop_seq[5] = { FIFO_TX_SOP1, FIFO_TX_SOP1, FIFO_TX_SOP1, FIFO_TX_SOP2, FIFO_TX_PACKSYM };
-    static const uint8_t eop_seq[4] = { FIFO_TX_JAM_CRC, FIFO_TX_EOP, FIFO_TX_TXOFF, FIFO_TX_TXON };
-
-    uint8_t msg_len = 2 + 4 * PD_NUMOBJ_GET(msg);
-
-    // Set number of bytes in header
-    sop_seq[4] = FIFO_TX_PACKSYM | msg_len;
-
-    ERROR_CHECK_SIMPLE(fusb302_registers_write(port, REG_FIFOS, sop_seq, ARRAY_SIZE(sop_seq)));
-    ERROR_CHECK_SIMPLE(fusb302_registers_write(port, REG_FIFOS, msg->bytes, msg_len));
-    ERROR_CHECK_SIMPLE(fusb302_registers_write(port, REG_FIFOS, eop_seq, ARRAY_SIZE(eop_seq)));
-
-    return ESP_OK;
-err:
-    return ret;
-}
-
-static esp_err_t fusb302b_find_best_pdo(i2c_port_t port, const pd_msg* msg, fusb302_pdo_t* pdo)
+static esp_err_t fusb302b_find_best_pdo(const pd_msg* msg, fusb302b_pdo_t* pdo)
 {
     uint32_t best_power_mw = 0;
 
@@ -259,7 +323,7 @@ static esp_err_t fusb302b_find_best_pdo(i2c_port_t port, const pd_msg* msg, fusb
     return ESP_OK;
 }
 
-static esp_err_t fusb302_select_pdo(i2c_port_t port, const fusb302_pdo_t* pdo)
+static esp_err_t fusb302b_select_pdo(fusb302b_state_t* state, const fusb302b_pdo_t* pdo)
 {
     pd_msg msg;
     msg.hdr = PD_MSGTYPE_REQUEST | PD_NUMOBJ(1);
@@ -272,15 +336,27 @@ static esp_err_t fusb302_select_pdo(i2c_port_t port, const fusb302_pdo_t* pdo)
 
     msg.obj[0] |= PD_RDO_USB_COMMS;
 
-    return fusb302b_send_message(port, &msg);
+    return fusb302b_send_message(state, &msg);
 }
 
-esp_err_t fusb302b_poll(i2c_port_t port)
+esp_err_t fusb302b_poll(fusb302b_state_t* state)
 {
     esp_err_t ret;
 
+    uint8_t interrupt;
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_INTERRUPT, &interrupt));
+    ESP_LOGI(TAG, "Interrupt  %u %u", interrupt, gpio_get_level(18));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_INTERRUPTA, &interrupt));
+    ESP_LOGI(TAG, "InterruptA %u %u", interrupt, gpio_get_level(18));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_INTERRUPTB, &interrupt));
+    ESP_LOGI(TAG, "InterruptB %u %u", interrupt, gpio_get_level(18));
+
+    reg_status0_t status0;
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS0, &status0.val));
+    ESP_LOGI(TAG, "Status0 %u", status0.val);
     reg_status1_t status1;
-    ERROR_CHECK_SIMPLE(fusb302_register_read(port, REG_STATUS1, &status1.val));
+    ERROR_CHECK_SIMPLE(fusb302b_register_read(state, REG_STATUS1, &status1.val));
+    ESP_LOGI(TAG, "Status1 %u", status1.val);
 
     while (status1.rx_empty == 0) {
         // Message waiting
@@ -288,17 +364,19 @@ esp_err_t fusb302b_poll(i2c_port_t port)
 
         bool msg_filled = false;
         pd_msg msg;
-        ERROR_CHECK_SIMPLE(fusb302b_read_message(port, &msg_filled, &msg));
+        ERROR_CHECK_SIMPLE(fusb302b_read_message(state, &msg_filled, &msg));
 
         if (!msg_filled) {
             continue;
         }
 
-        fusb302_pdo_t pdo = (fusb302_pdo_t) { .index = 0xff };
-        ERROR_CHECK_SIMPLE(fusb302b_find_best_pdo(port, &msg, &pdo));
+        ESP_LOGI(TAG, "msgtype %u", PD_MSGTYPE_GET((&msg)));
+
+        fusb302b_pdo_t pdo = (fusb302b_pdo_t) { .index = 0xff };
+        ERROR_CHECK_SIMPLE(fusb302b_find_best_pdo(&msg, &pdo));
 
         if (pdo.index != 0xff) {
-            ERROR_CHECK_SIMPLE(fusb302_select_pdo(port, &pdo));
+            ERROR_CHECK_SIMPLE(fusb302b_select_pdo(state, &pdo));
             led_set_color((rgb_t) {
                 .r = 0x00,
                 .g = 0x01,

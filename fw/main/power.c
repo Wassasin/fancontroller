@@ -4,6 +4,7 @@
 
 #include "driver/fusb302b.h"
 #include "i2c_bus.h"
+#include "led.h"
 
 #define TAG "power"
 
@@ -15,8 +16,9 @@ static SemaphoreHandle_t s_sem;
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
     xSemaphoreGiveFromISR(s_sem, &xHigherPriorityTaskWoken); // Ignore result
-    if( xHigherPriorityTaskWoken == pdTRUE ) {
+    if (xHigherPriorityTaskWoken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
 }
@@ -35,26 +37,34 @@ static void power_task(void* arg)
     gpio_install_isr_service(0);
     gpio_isr_handler_add(GPIO_INT_N, gpio_isr_handler, NULL);
 
+    fusb302b_state_t state;
+
     // Temporary test
     ESP_ERROR_CHECK(i2c_bus_take(I2C_BUS));
-    ESP_ERROR_CHECK(fusb302b_init(I2C_BUS));
+    ESP_ERROR_CHECK(fusb302b_init(&state, I2C_BUS));
     i2c_bus_give(I2C_BUS);
 
     bool pd = false;
     while (1) {
-        xSemaphoreTake(s_sem, 100 / portTICK_PERIOD_MS); // Ignore result
+        xSemaphoreTake(s_sem, 2000 / portTICK_PERIOD_MS); // Ignore result
 
         if (!pd) {
             ESP_ERROR_CHECK(i2c_bus_take(I2C_BUS));
-            esp_err_t res = fusb302b_try_autoconnect(I2C_BUS);
-            i2c_bus_give(I2C_BUS);
+            esp_err_t res = fusb302b_try_autoconnect(&state);
+
             if (res == ESP_OK) {
                 pd = true;
                 ESP_LOGI(TAG, "USB PD CC pin found!");
             }
+
+            ESP_ERROR_CHECK(fusb302b_poke(&state));
+
+            i2c_bus_give(I2C_BUS);
         }
-        
-        ESP_ERROR_CHECK(fusb302b_poll(I2C_BUS));
+
+        ESP_ERROR_CHECK(i2c_bus_take(I2C_BUS));
+        ESP_ERROR_CHECK(fusb302b_poll(&state));
+        i2c_bus_give(I2C_BUS);
     }
 }
 
