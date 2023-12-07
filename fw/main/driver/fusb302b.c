@@ -188,6 +188,8 @@ static esp_err_t fusb302b_read_message(i2c_port_t port, bool* msg_filled, pd_msg
     uint8_t garbage[4];
     ERROR_CHECK_SIMPLE(fusb302_registers_read(port, REG_FIFOS, garbage, ARRAY_SIZE(garbage)));
 
+    *msg_filled = true;
+
     return ESP_OK;
 err:
     return ret;
@@ -297,7 +299,6 @@ esp_err_t fusb302b_poll(i2c_port_t port)
 
         if (pdo.index != 0xff) {
             ERROR_CHECK_SIMPLE(fusb302_select_pdo(port, &pdo));
-
             led_set_color((rgb_t) {
                 .r = 0x00,
                 .g = 0x01,
